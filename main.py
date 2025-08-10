@@ -320,6 +320,45 @@ class BugTrackerApp:
         self.refresh_btn = ttk.Button(actions, text="刷新", command=self._populate)
         self.refresh_btn.pack(side="left", padx=4)
 
+        # 搜索 / 过滤区域
+        search_frame = ttk.Frame(self.root)
+        search_frame.pack(fill="x", padx=8, pady=(0, 4))
+
+        ttk.Label(search_frame, text="关键词:").pack(side="left")
+        self.search_var = tk.StringVar()
+        self.search_entry = ttk.Entry(search_frame, textvariable=self.search_var, width=28)
+        self.search_entry.pack(side="left", padx=(4, 8))
+        self.search_entry.bind("<Return>", lambda e: self.on_search())
+
+        ttk.Label(search_frame, text="优先级:").pack(side="left")
+        self.priority_filter_var = tk.StringVar(value="全部")
+        self.priority_filter_cb = ttk.Combobox(
+            search_frame,
+            textvariable=self.priority_filter_var,
+            width=8,
+            state="readonly",
+            values=["全部"] + self.PRIORITIES,
+        )
+        self.priority_filter_cb.pack(side="left", padx=(4, 8))
+        self.priority_filter_cb.bind("<<ComboboxSelected>>", lambda e: self.on_search(auto=True))
+
+        ttk.Label(search_frame, text="状态:").pack(side="left")
+        self.status_filter_var = tk.StringVar(value="全部")
+        self.status_filter_cb = ttk.Combobox(
+            search_frame,
+            textvariable=self.status_filter_var,
+            width=12,
+            state="readonly",
+            values=["全部"] + self.STATUSES,
+        )
+        self.status_filter_cb.pack(side="left", padx=(4, 8))
+        self.status_filter_cb.bind("<<ComboboxSelected>>", lambda e: self.on_search(auto=True))
+
+        self.search_btn = ttk.Button(search_frame, text="搜索", command=self.on_search)
+        self.search_btn.pack(side="left")
+        self.clear_search_btn = ttk.Button(search_frame, text="清除过滤", command=self.on_clear_search)
+        self.clear_search_btn.pack(side="left", padx=(6, 0))
+
         # 列表区域
         columns = ("id", "description", "priority", "status", "created_at", "updated_at")
         self.tree = ttk.Treeview(self.root, columns=columns, show="headings", selectmode="browse")
@@ -458,8 +497,10 @@ class BugTrackerApp:
         """
         for child in self.tree.get_children():
             self.tree.delete(child)
-        for bug in sorted(self.tracker.list_bugs(), key=lambda b: b.id):
+        # 遍历过滤结果并插入到表格
+        for bug in self._get_filtered_bugs():
             self._insert_tree_item(bug)
+        # 若传入 select_id，刷新后尝试重新选中该行
         if select_id is not None:
             for iid in self.tree.get_children():
                 if int(self.tree.set(iid, "id")) == select_id:
@@ -490,6 +531,48 @@ class BugTrackerApp:
             return bug_id
         except Exception:
             return None
+
+    # ----------------- 搜索 / 过滤 ----------------- #
+    def _get_filtered_bugs(self) -> List[Bug]:
+        """根据当前搜索/过滤条件返回排序后的 bug 列表.
+
+        过滤逻辑:
+        - 关键词: 描述中大小写不敏感包含
+        - 优先级: 匹配选中 (忽略 "全部")
+        - 状态:   匹配选中 (忽略 "全部")
+        """
+        bugs = self.tracker.list_bugs()
+        keyword = (self.search_var.get().strip().lower() if hasattr(self, "search_var") else "")
+        pri_filter = getattr(self, "priority_filter_var", tk.StringVar(value="全部")).get()
+        status_filter = getattr(self, "status_filter_var", tk.StringVar(value="全部")).get()
+
+        def match(b: Bug) -> bool:
+            if keyword and keyword not in b.description.lower():
+                return False
+            if pri_filter != "全部" and b.priority != pri_filter:
+                return False
+            if status_filter != "全部" and b.status != status_filter:
+                return False
+            return True
+
+        return sorted([b for b in bugs if match(b)], key=lambda b: b.id)
+
+    def on_search(self, auto: bool = False) -> None:
+        """执行搜索过滤并刷新列表.
+
+        参数 auto: 是否为自动触发 (下拉选择变化)，用于决定状态栏文案。
+        """
+        self._populate()
+        if not auto:
+            self.status_text.set("已应用搜索过滤")
+
+    def on_clear_search(self) -> None:
+        """清除所有搜索与过滤条件并刷新列表."""
+        self.search_var.set("")
+        self.priority_filter_var.set("全部")
+        self.status_filter_var.set("全部")
+        self._populate()
+        self.status_text.set("过滤已清除")
 
     def on_export_markdown(self) -> None:
         """导出当前列表为 Markdown 文件."""
