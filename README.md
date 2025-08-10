@@ -6,6 +6,7 @@
 - 标记完成 (状态设为 Done)
 - 删除条目
 - Treeview 表格展示所有条目
+- 导出为 Markdown 表格文件 (按钮：导出 Markdown)
 - JSON 文件 (`bugs.json`) 自动持久化
 - 退出前自动保存
 
@@ -42,7 +43,6 @@ python .\main.py
 
 ## 扩展建议
 - 增加搜索 / 过滤功能
-- 增加导出为 CSV / Markdown
 - 增加标签 (tags) 字段
 - 增加按优先级或状态统计汇总
 - 用 `logging` 记录操作日志
