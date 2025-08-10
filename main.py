@@ -212,6 +212,16 @@ class BugTracker:
             return True
         return False
 
+    def clear_all(self) -> int:
+        """清空所有 Bug，返回删除的条目数量。"""
+        count = len(self.bugs)
+        if count == 0:
+            return 0
+        self.bugs = []
+        self._next_id = 1  # 也可选择不重置，根据需求决定
+        self.save()
+        return count
+
     def list_bugs(self) -> List[Bug]:
         """返回当前所有 Bug 的浅拷贝列表 (避免外部直接修改内部列表)."""
         return list(self.bugs)
@@ -312,8 +322,12 @@ class BugTrackerApp:
         self.done_btn = ttk.Button(actions, text="标记完成", command=self.on_mark_done)
         self.done_btn.pack(side="left", padx=4)
 
-        self.delete_btn = ttk.Button(actions, text="删除选中", command=self.on_delete)
+        # 批量删除与清空全部按钮（支持多选）
+        self.delete_btn = ttk.Button(actions, text="删除选中", command=self.on_delete_multi)
         self.delete_btn.pack(side="left", padx=4)
+
+        self.clear_all_btn = ttk.Button(actions, text="清空全部", command=self.on_delete_all)
+        self.clear_all_btn.pack(side="left", padx=4)
 
         self.export_btn = ttk.Button(actions, text="导出 Markdown", command=self.on_export_markdown)  # 新增按钮
         self.export_btn.pack(side="left", padx=4)
@@ -362,7 +376,7 @@ class BugTrackerApp:
 
         # 列表区域
         columns = ("id", "description", "priority", "status", "created_at", "updated_at")
-        self.tree = ttk.Treeview(self.root, columns=columns, show="headings", selectmode="browse")
+        self.tree = ttk.Treeview(self.root, columns=columns, show="headings", selectmode="extended")
         self.tree.pack(fill="both", expand=True, padx=8, pady=4)
 
         headers = {
@@ -424,22 +438,44 @@ class BugTrackerApp:
             self.add_btn.config(text="添加")
         self.reset_form(clear_status=False)
 
-    def on_edit(self) -> None:
-        """进入编辑模式: 将选中行内容填充到表单并切换按钮文字."""
-        bug_id = self._get_selected_bug_id()
-        if bug_id is None:
-            messagebox.showinfo("提示", "请选择一个条目")
+    def on_delete_multi(self) -> None:
+        """批量删除当前选中 Bug（多选支持）。"""
+        ids = self._get_selected_bug_ids()
+        if not ids:
+            messagebox.showinfo("提示", "请选择至少一个条目")
             return
-        bug = self.tracker.get_bug(bug_id)
-        if not bug:
+        ids_sorted = sorted(ids)
+        preview = ", ".join(str(i) for i in ids_sorted[:10])
+        more = "..." if len(ids_sorted) > 10 else ""
+        if not messagebox.askyesno("确认删除", f"即将删除 {len(ids_sorted)} 个条目: {preview}{more}\n此操作不可撤销，是否继续？"):
             return
-        self.desc_var.set(bug.description)
-        self.priority_var.set(bug.priority)
-        self.status_var.set(bug.status)
-        self._editing_bug_id = bug.id
-        self.add_btn.config(text="保存修改")
-        self.status_text.set(f"编辑模式: #{bug.id}")
-        self.desc_entry.focus_set()
+        deleted = 0
+        for bid in ids_sorted:
+            if self.tracker.delete_bug(bid):
+                deleted += 1
+                if self._editing_bug_id == bid:
+                    self._editing_bug_id = None
+        self.add_btn.config(text="添加")
+        self.reset_form(clear_status=False)
+        self._populate()
+        self.status_text.set(f"已删除 {deleted} 条 (请求 {len(ids_sorted)})")
+
+    def on_delete_all(self) -> None:
+        """清空全部条目（需二次确认）。"""
+        total = len(self.tracker.list_bugs())
+        if total == 0:
+            messagebox.showinfo("提示", "当前没有任何条目")
+            return
+        if not messagebox.askyesno("确认清空", f"将删除全部 {total} 条记录，且不可撤销。是否继续？"):
+            return
+        deleted = self.tracker.clear_all()
+        self._editing_bug_id = None
+        self.add_btn.config(text="添加")
+        self.reset_form(clear_status=False)
+        self._populate()
+        self.status_text.set(f"已清空 {deleted} 条")
+
+    # 批量/全部删除操作结束后会更新状态栏; 移除之前误插入的多余状态设置行。
 
     def on_mark_done(self) -> None:
         """将选中 Bug 状态改为 Done (若尚未完成)."""
@@ -457,20 +493,24 @@ class BugTrackerApp:
         self._populate(select_id=bug_id)
         self.status_text.set(f"Bug #{bug_id} 标记 Done")
 
-    def on_delete(self) -> None:
-        """删除当前选中 Bug（确认对话框防误操作）."""
+    def on_edit(self) -> None:
+        """进入编辑模式: 将选中行数据填入表单, 下一次提交保存修改."""
         bug_id = self._get_selected_bug_id()
         if bug_id is None:
-            messagebox.showinfo("提示", "请选择一个条目")
+            messagebox.showinfo("提示", "请选择要编辑的条目")
             return
-        if messagebox.askyesno("确认删除", f"确定要删除 Bug #{bug_id} 吗？"):
-            self.tracker.delete_bug(bug_id)
-            self._populate()
-            self.status_text.set(f"删除 Bug #{bug_id}")
-            if self._editing_bug_id == bug_id:
-                self._editing_bug_id = None
-                self.add_btn.config(text="添加")
-                self.reset_form(clear_status=False)
+        bug = self.tracker.get_bug(bug_id)
+        if not bug:
+            messagebox.showwarning("警告", "未找到该条目, 可能已被删除")
+            return
+        self.desc_var.set(bug.description)
+        self.priority_var.set(bug.priority)
+        self.status_var.set(bug.status)
+        self._editing_bug_id = bug.id
+        self.add_btn.config(text="保存修改")
+        self.status_text.set(f"编辑模式: #{bug.id}")
+        self.desc_entry.focus_set()
+
 
     def reset_form(self, clear_status: bool = True) -> None:
         """重置输入表单.
@@ -532,6 +572,16 @@ class BugTrackerApp:
             return bug_id
         except Exception:
             return None
+
+    def _get_selected_bug_ids(self) -> List[int]:
+        """返回所有选中行的 Bug ID 列表（忽略解析失败的行）。"""
+        ids: List[int] = []
+        for iid in self.tree.selection():
+            try:
+                ids.append(int(self.tree.set(iid, "id")))
+            except Exception:
+                continue
+        return ids
 
     # ----------------- 搜索 / 过滤 ----------------- #
     def _get_filtered_bugs(self) -> List[Bug]:
