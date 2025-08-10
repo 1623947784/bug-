@@ -1,17 +1,44 @@
 """简易 Bug 追踪器 (Tkinter 版本)
 
-功能:
+==================== 概览 ====================
+这是一个使用 Tkinter 构建的桌面 GUI 示例程序，用于演示最基础的
+Bug / 任务追踪功能 (Issue Tracking)。特点：轻量、单文件、无第三方依赖。
+
+核心功能:
 1. 添加 Bug：描述、优先级 (Low/Medium/High)、状态 (Open/In Progress/Done)
-2. 查看列表（Treeview）
-3. 编辑选中条目
-4. 标记完成（状态改为 Done）
+2. 查看列表（ttk.Treeview 表格展示）
+3. 编辑选中条目（进入编辑模式后可保存修改）
+4. 标记完成（快速把状态改为 Done）
 5. 删除选中条目
-6. 本地 JSON 自动持久化 (bugs.json)
-7. 退出前自动保存；每次 CRUD 操作即时保存
+6. 本地 JSON 自动持久化 (bugs.json) —— 每次增删改都会立即写入
+7. 退出前再尝试保存一次，保证数据落盘
 
-文件结构: 仅此一个 main.py (标准库实现，无需额外依赖)
+持久化策略:
+- 使用 JSON 数组保存所有 Bug；每个 Bug 拥有自增整数 ID
+- 在加载时扫描现有最大 ID 推断下一个 ID，避免重复
 
-运行: python main.py
+架构划分:
+- 数据层: Bug 数据类 + BugTracker 管理列表与读写文件
+- 表现层: BugTrackerApp 负责 Tkinter GUI、事件绑定、与数据层交互
+
+线程 / 并发说明:
+- 全部逻辑运行在主线程事件循环中，无并发访问问题
+- 如果未来添加后台任务（如自动同步服务器），应引入线程/队列并在主线程中安全更新 UI
+
+错误处理策略:
+- 读取 JSON 出错 -> 弹出警告并回到空数据
+- 保存出错 -> 弹出错误提示但不中断程序
+
+扩展方向（可逐步演进）:
+- 添加过滤 / 搜索 / 排序控制
+- 增加更多状态（Duplicate / Invalid / Won't Fix）
+- 支持批量操作、导出 CSV、导入导出备份
+- 引入日志记录、Undo/Redo、标签系统、负责人字段
+- 替换 UI 框架为 PySide6 / PyQt6 以获得更现代外观
+
+运行: 直接执行 `python main.py`
+
+设计目标: 代码清晰、注释充分、易于二次开发与教学演示。
 """
 
 from __future__ import annotations
@@ -46,6 +73,21 @@ class Bug:
 	def from_dict(data: Dict[str, Any]) -> "Bug":
 		return Bug(**data)
 
+	"""Bug 数据对象.
+
+	字段说明:
+	- id:            自增主键（程序内部维护，不重复）
+	- description:   Bug 描述（纯文本）
+	- priority:      优先级 (Low / Medium / High) —— 可扩展为枚举
+	- status:        状态 (Open / In Progress / Done) —— 可扩展
+	- created_at:    创建时间 ISO8601 字符串（到秒）
+	- updated_at:    最近一次更新（编辑 / 状态变化）时间
+
+	为什么使用 dataclass:
+	- 自动实现 __init__ / __repr__ / asdict 支持
+	- 结构紧凑，利于序列化
+	"""
+
 
 class BugTracker:
 	def __init__(self, data_file: str = "bugs.json") -> None:
@@ -54,8 +96,26 @@ class BugTracker:
 		self._next_id = 1
 		self.load()
 
+	"""数据管理器 (领域层 / Repository 角色).
+
+	职责:
+	- 负责内存中维护 Bug 列表
+	- 提供 CRUD API
+	- 负责与 JSON 文件的读写持久化
+
+	为什么与 GUI 分离:
+	- 便于未来替换为命令行 / Web / 其它界面
+	- 便于后续编写单元测试（只需针对 BugTracker 测试业务逻辑）
+	"""
+
 	# ----------------- 持久化 ----------------- #
 	def load(self) -> None:
+		"""从 JSON 文件加载数据.
+
+		容错:
+		- 文件不存在: 忽略 (保持空列表)
+		- JSON 格式损坏: 发出警告并清空数据
+		"""
 		if not os.path.exists(self.data_file):
 			return
 		try:
@@ -70,6 +130,11 @@ class BugTracker:
 			self._next_id = 1
 
 	def save(self) -> None:
+		"""将内存中的 Bug 列表写入 JSON 文件.
+
+		写入策略: 覆盖写 (简单直接)；数据量小可忽略性能问题。
+		异常: 捕获 OSError 并用 messagebox 告知用户。
+		"""
 		try:
 			with open(self.data_file, "w", encoding="utf-8") as f:
 				json.dump([b.to_dict() for b in self.bugs], f, ensure_ascii=False, indent=2)
@@ -78,6 +143,15 @@ class BugTracker:
 
 	# ----------------- CRUD 操作 ----------------- #
 	def add_bug(self, description: str, priority: str, status: str = "Open") -> Bug:
+		"""创建一个新的 Bug 并立即持久化.
+
+		参数:
+		- description: 文本描述，会去除首尾空白
+		- priority:    用户下拉选择的优先级
+		- status:      初始状态 (默认 Open)
+
+		返回: 新建的 Bug 对象 (已加入列表)
+		"""
 		now = datetime.now().isoformat(timespec="seconds")
 		bug = Bug(
 			id=self._next_id,
@@ -93,9 +167,19 @@ class BugTracker:
 		return bug
 
 	def get_bug(self, bug_id: int) -> Optional[Bug]:
+		"""按 ID 查找 Bug.
+
+		找不到返回 None.
+		"""
 		return next((b for b in self.bugs if b.id == bug_id), None)
 
 	def update_bug(self, bug_id: int, *, description: Optional[str] = None, priority: Optional[str] = None, status: Optional[str] = None) -> bool:
+		"""更新指定 Bug 的部分字段.
+
+		仅在字段发生真实变化时才刷新 updated_at 并保存，减少无谓写盘。
+
+		返回: 是否有字段被修改。
+		"""
 		bug = self.get_bug(bug_id)
 		if not bug:
 			return False
@@ -115,6 +199,10 @@ class BugTracker:
 		return changed
 
 	def delete_bug(self, bug_id: int) -> bool:
+		"""删除指定 ID 的 Bug.
+
+		返回: 是否删除成功 (存在并被移除)。
+		"""
 		before = len(self.bugs)
 		self.bugs = [b for b in self.bugs if b.id != bug_id]
 		if len(self.bugs) != before:
@@ -123,6 +211,7 @@ class BugTracker:
 		return False
 
 	def list_bugs(self) -> List[Bug]:
+		"""返回当前所有 Bug 的浅拷贝列表 (避免外部直接修改内部列表)."""
 		return list(self.bugs)
 
 
@@ -134,6 +223,18 @@ class BugTrackerApp:
 	STATUSES = ["Open", "In Progress", "Done"]
 
 	def __init__(self, root: tk.Tk, tracker: BugTracker) -> None:
+		"""初始化 GUI 应用.
+
+		参数:
+		- root: Tk 根窗口
+		- tracker: 数据管理器实例
+
+		初始化顺序:
+		1. 设置窗口标题和尺寸
+		2. 构建界面控件
+		3. 填充现有数据
+		4. 绑定窗口关闭事件
+		"""
 		self.root = root
 		self.tracker = tracker
 		self.root.title("简易 Bug 追踪器")
@@ -145,6 +246,15 @@ class BugTrackerApp:
 
 	# ----------------- UI 构建 ----------------- #
 	def _build_widgets(self) -> None:
+		"""创建并布局所有界面控件.
+
+		布局说明:
+		- 上部: 表单 (LabelFrame) 输入描述 / 优先级 / 状态 + 添加/重置按钮
+		- 中部: 操作按钮行 (编辑 / 标记完成 / 删除 / 刷新)
+		- 下部: Treeview 表格 + 状态栏
+
+		无返回值，创建的控件绑定到 self.* 以便后续访问。
+		"""
 		# 输入框区域
 		form = ttk.LabelFrame(self.root, text="新增 / 编辑 Bug")
 		form.pack(fill="x", padx=8, pady=6)
@@ -223,6 +333,12 @@ class BugTrackerApp:
 
 	# ----------------- 事件处理 ----------------- #
 	def on_add(self) -> None:
+		"""添加或保存修改.
+
+		行为依据 _editing_bug_id:
+		- 为 None: 新增记录
+		- 不为 None: 更新对应记录后退出编辑模式
+		"""
 		desc = self.desc_var.get().strip()
 		if not desc:
 			messagebox.showinfo("提示", "描述不能为空")
@@ -248,6 +364,7 @@ class BugTrackerApp:
 		self.reset_form(clear_status=False)
 
 	def on_edit(self) -> None:
+		"""进入编辑模式: 将选中行内容填充到表单并切换按钮文字."""
 		bug_id = self._get_selected_bug_id()
 		if bug_id is None:
 			messagebox.showinfo("提示", "请选择一个条目")
@@ -264,6 +381,7 @@ class BugTrackerApp:
 		self.desc_entry.focus_set()
 
 	def on_mark_done(self) -> None:
+		"""将选中 Bug 状态改为 Done (若尚未完成)."""
 		bug_id = self._get_selected_bug_id()
 		if bug_id is None:
 			messagebox.showinfo("提示", "请选择一个条目")
@@ -279,6 +397,7 @@ class BugTrackerApp:
 		self.status_text.set(f"Bug #{bug_id} 标记 Done")
 
 	def on_delete(self) -> None:
+		"""删除当前选中 Bug（确认对话框防误操作）."""
 		bug_id = self._get_selected_bug_id()
 		if bug_id is None:
 			messagebox.showinfo("提示", "请选择一个条目")
@@ -293,6 +412,10 @@ class BugTrackerApp:
 				self.reset_form(clear_status=False)
 
 	def reset_form(self, clear_status: bool = True) -> None:
+		"""重置输入表单.
+
+		参数 clear_status: 是否同时重置底部状态栏文本。
+		"""
 		self.desc_var.set("")
 		self.priority_var.set("Medium")
 		self.status_var.set("Open")
@@ -301,12 +424,17 @@ class BugTrackerApp:
 		self.desc_entry.focus_set()
 
 	def on_close(self) -> None:
-		# 关闭前保存
+		"""窗口关闭回调: 先保存再销毁窗口."""
+		# 关闭前保存，确保最新状态写入磁盘
 		self.tracker.save()
 		self.root.destroy()
 
 	# ----------------- Treeview 操作 ----------------- #
 	def _populate(self, *, select_id: Optional[int] = None) -> None:
+		"""刷新 Treeview 显示.
+
+		参数 select_id: 刷新后尝试选中指定 ID 的行（用于编辑/更新反馈）。
+		"""
 		for child in self.tree.get_children():
 			self.tree.delete(child)
 		for bug in sorted(self.tracker.list_bugs(), key=lambda b: b.id):
@@ -320,6 +448,7 @@ class BugTrackerApp:
 					break
 
 	def _insert_tree_item(self, bug: Bug) -> None:
+		"""向 Treeview 追加一行."""
 		values = (
 			bug.id,
 			bug.description,
@@ -331,6 +460,7 @@ class BugTrackerApp:
 		self.tree.insert("", "end", values=values)
 
 	def _get_selected_bug_id(self) -> Optional[int]:
+		"""获取当前选中行的 Bug ID；若无选中或解析失败返回 None."""
 		sel = self.tree.selection()
 		if not sel:
 			return None
@@ -345,7 +475,17 @@ class BugTrackerApp:
 
 
 def main() -> None:
-	# 数据文件放在脚本同目录
+	"""程序入口.
+
+	负责:
+	1. 计算数据文件路径（与脚本同目录）
+	2. 初始化数据层与 Tk 根窗口
+	3. Windows 下尽力开启 DPI 感知减少模糊
+	4. 启动事件循环
+
+	无返回值，阻塞直到窗口关闭。
+	"""
+	# 数据文件放在脚本同目录，避免工作目录变化导致找不到文件
 	script_dir = os.path.dirname(os.path.abspath(sys.argv[0]))
 	data_file = os.path.join(script_dir, "bugs.json")
 	tracker = BugTracker(data_file=data_file)
