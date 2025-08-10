@@ -53,6 +53,7 @@ from typing import List, Optional, Dict, Any
 import tkinter as tk
 from tkinter import ttk, messagebox
 from tkinter import filedialog  # 新增: 保存文件对话框
+from tkinter import font as tkfont  # UI 字体缩放
 
 
 # --------------------------- 数据模型与存储 --------------------------- #
@@ -619,6 +620,50 @@ def main() -> None:
     data_file = os.path.join(script_dir, "bugs.json")
     tracker = BugTracker(data_file=data_file)
     root = tk.Tk()
+
+    # ---------------- UI 放大设置 ---------------- #
+    # 通过环境变量 BUG_TRACKER_SCALE 控制整体缩放 (1.0~2.0)
+    try:
+        scale_env = float(os.getenv("BUG_TRACKER_SCALE", "1.3"))
+    except ValueError:
+        scale_env = 1.0
+    UI_SCALE = max(1.0, min(scale_env, 2.0))
+
+    def apply_ui_scale(root: tk.Tk, scale: float) -> None:
+        """统一调整字体、行高、padding 来放大界面.
+
+        - 修改 Tk 命名字体: TkDefaultFont/TkTextFont/TkMenuFont/TkHeadingFont
+        - 设置 ttk 控件样式 padding / rowheight
+        - 调整 tk scaling (DPI 缩放)
+        """
+        base_pt = int(11 * scale)
+        heading_pt = int(base_pt * 1.15)
+        for name, size in [
+            ("TkDefaultFont", base_pt),
+            ("TkTextFont", base_pt),
+            ("TkMenuFont", base_pt),
+            ("TkHeadingFont", heading_pt),
+        ]:
+            try:
+                tkfont.nametofont(name).configure(size=size)
+            except Exception:
+                pass
+        # global scaling
+        try:
+            root.tk.call('tk', 'scaling', scale)
+        except Exception:
+            pass
+        style = ttk.Style(root)
+        # 控件 padding / 行高
+        btn_pad_x = int(8 * scale)
+        btn_pad_y = int(4 * scale)
+        style.configure("TButton", padding=(btn_pad_x, btn_pad_y))
+        style.configure("TCombobox", padding=(4 * scale, 2 * scale, 4 * scale, 2 * scale))
+        style.configure("Treeview", rowheight=int(24 * scale))
+
+    if UI_SCALE > 1.01:
+        apply_ui_scale(root, UI_SCALE)
+
     # Windows 高 DPI 适配（可忽略失败）
     try:
         if sys.platform.startswith("win"):
@@ -628,6 +673,15 @@ def main() -> None:
     except Exception:
         pass
     app = BugTrackerApp(root, tracker)
+    # 初始窗口尺寸按缩放简单放大
+    if UI_SCALE > 1.01:
+        try:
+            root.update_idletasks()
+            w = int(root.winfo_width() * UI_SCALE)
+            h = int(root.winfo_height() * UI_SCALE)
+            root.geometry(f"{w}x{h}")
+        except Exception:
+            pass
     root.mainloop()
 
 
